@@ -20,10 +20,56 @@ nslookup=`which nslookup 2>/dev/null`
 nvram=`which nvram 2>/dev/null`
 
 chains='INPUT OUTPUT FORWARD'
+backup=
 DEBUG=
 interfaces='eth0 tun0' # in addition to detected WAN
-DB=$2
 mode=
+criteria=
+validity=
+
+while true; do
+   case "$1" in
+      --backup)
+        backup="$2"
+        shift
+        ;;
+      --backup=*)
+        backup="${1#*=}"
+        ;;
+      --criteria=*=*,*)
+        arg="${1#*=}"
+        criteria="$criteria,${arg%,*}"
+        validity="$validity,${arg#*,}"
+        ;;
+      --criteria)
+        criteria="$criteria,${2%,*}"
+        validity="$validity,${2#*,}"
+        shift
+        ;;
+      --hour)
+        criteria="$criteria,hour=$(date +%H)"
+        validity="$validity,$(date +%Y%m%d)"
+        ;;
+      --day)
+        criteria="$criteria,day=$(date +%d)"
+        validity="$validity,$(date +%Y%m)"
+        ;;
+      --month)
+        criteria="$criteria,month=$(date +%m)"
+        validity="$validity,$(date +%Y)"
+        ;;
+      --year)
+        criteria="$criteria,year=$(date +%Y)"
+        validity="$validity,0"
+        ;;
+      *)
+        break
+        ;;
+   esac
+   shift
+done
+
+DB="$2"
 
 # DNS server for reverse lookups provided in "DNS".
 # don't perform reverse DNS lookups by default
@@ -33,6 +79,7 @@ header="#mac,ip,iface,in,out,total,first_date,last_date"
 
 createDbIfMissing()
 {
+    [ ! -f "$DB" ] && [ -f "$backup" ] && cp "$backup" "$DB"
     [ ! -f "$DB" ] && echo $header > "$DB"
 }
 
@@ -193,10 +240,45 @@ update()
     done
     # the iptables and readDB commands have to be separate. Otherwise,
     # they will fight over iptables locks
-    awk -v mode="$mode" -v interfaces=\""$interfaces"\" -f $binDir/readDB.awk \
+    awk -v mode="$mode" -v interfaces=\""$interfaces"\" \
+        -v criteria="$criteria" \
+        -v validity="$validity" \
+        -f $binDir/readDB.awk \
 	$DB \
 	/proc/net/arp \
 	/tmp/iptables_$$.tmp
+    unlock
+}
+
+add_db(){
+    createDbIfMissing
+    checkDB
+    checkWAN
+
+    echo > /tmp/iptables_$$.tmp
+    lock
+    awk -v mode="$mode" -v interfaces=\""$interfaces"\" -f $binDir/readDB.awk \
+	"$DB" \
+	/proc/net/arp \
+	/tmp/iptables_$$.tmp \
+	"$1"
+    unlock
+}
+
+sub_db(){
+    createDbIfMissing
+    checkDB
+    checkWAN
+
+    echo "$header" > /tmp/add_$$.tmp
+    echo > /tmp/iptables_$$.tmp
+    lock
+    awk -v mode="$mode" -v interfaces=\""$interfaces"\" -f $binDir/readDB.awk \
+	"$DB" \
+	/proc/net/arp \
+	/tmp/iptables_$$.tmp \
+	/tmp/add_$$.tmp \
+	"$1"
     unlock
 }
 
@@ -221,29 +303,67 @@ case $1 in
 
     "publish" )
 	checkDbArg
-	[ -z "$3" ] && echo "ERROR: Missing argument 3 (output html file)" && exit 1
+	htmlFile=$3
+	userDb=${4#-}
+	shift 4
+	[ -z "$htmlFile" ] && echo "ERROR: Missing argument 3 (output html file)" && exit 1
 	
 	# sort DB
 	lock
 
 	# busybox sort truncates numbers to 32 bits
-	grep -v '^#' $DB | awk -F, '{OFS=","; a=sprintf("%f",$4/1e6); $4=""; print a,$0}' | tr -s ',' | sort -rn | awk -F, '{OFS=",";$1=sprintf("%f",$1*1e6);print}' > /tmp/sorted_$$.tmp
+	grep -v '^#' $DB | awk -F, '{OFS=","; a=sprintf("%f",$4/1e6); $4="-1"; print a,$0}' | sort -rn | awk -F, '{OFS=",";$1=sprintf("%f",$1*1e6);print}' > /tmp/sorted_$$.tmp
 
         # create HTML page
-	rm -f $3.tmp
-	cp $dataDir/usage.htm1 $3.tmp
+	rm -f $htmlFile.tmp
+	cp $dataDir/usage.htm1 $htmlFile.tmp
 
 	#!@todo fix publishing
-	while IFS=, read PEAKUSAGE_IN MAC IP IFACE PEAKUSAGE_OUT TOTAL FIRSTSEEN LASTSEEN
+	while IFS=, read PEAKUSAGE_IN MAC IP IFACE FOO PEAKUSAGE_OUT TOTAL FIRSTSEEN LASTSEEN CRITERIA VALIDITY
 	do
 	    echo "
-new Array(\"$(lookup $MAC $IP $4)\",\"$MAC\",\"$IP\",
-$PEAKUSAGE_IN,$PEAKUSAGE_OUT,$TOTAL,\"$FIRSTSEEN\",\"$LASTSEEN\")," >> $3.tmp
+new Array(\"$(lookup $MAC $IP $userDb)\",\"$MAC\",\"$IP\",
+$PEAKUSAGE_IN,$PEAKUSAGE_OUT,$TOTAL,
+\"$FIRSTSEEN\",\"$LASTSEEN\",
+\"$CRITERIA\", \"$VALIDITY\")," >> $htmlFile.tmp
 	done < /tmp/sorted_$$.tmp
-	echo "0);" >> $3.tmp
+	echo "0);" >> $htmlFile.tmp
+
+	echo "/* $(cat /tmp/sorted_$$.tmp) */" >> $htmlFile.tmp
+
+        false && (
+        echo "var timeseries = [];"
+        for arg in "$@"; do
+            case "$arg" in
+                *+=*)
+                    mode='+'
+                    name="${arg%%+*}"
+                    file="${arg#*=}"
+                    ;;
+                *=*)
+                    mode='='
+                    name="${arg%%=*}"
+                    file="${arg#*=}"
+                    ;;
+                *)
+                    mode='='
+                    name="${arg##*/}"
+                    name="${name%.db}"
+                    file="$arg"
+                    ;;
+            esac
+            echo "timeseries.push({mode: \"$mode\", name: \"$name\", in:{"
+            awk -F, '! /^#/ { OFS=" "; printf("\"%s\": %s\n", $1, $4)}'  "$file"
+            echo "}, out:{"
+            awk -F, '! /^#/ { OFS=" "; printf("\"%s\": %s\n", $1, $5)}'  "$file"
+            echo "}, total:{"
+            awk -F, '! /^#/ { OFS=" "; printf("\"%s\": %s\n", $1, $6)}'  "$file"
+            echo "}})"
+        done
+        ) >> $htmlFile.tmp
 	
-	sed "s/(date)/`date`/" < $dataDir/usage.htm2 >> $3.tmp
-	mv $3.tmp $3
+	sed "s/(date)/`date`/" < $dataDir/usage.htm2 >> $htmlFile.tmp
+	mv $htmlFile.tmp $htmlFile
 
 	unlock
 	
@@ -285,7 +405,17 @@ $PEAKUSAGE_IN,$PEAKUSAGE_OUT,$TOTAL,\"$FIRSTSEEN\",\"$LASTSEEN\")," >> $3.tmp
 
     *)
 	echo \
-"Usage: $0 {setup|update|publish|remove} [options...]
+"Usage: $0 [flags...] {setup|update|publish|remove} [options...]
+Flags:
+   --backup DBFILE
+      location of a database backup if the main db is not found
+   --criteria NAME=CRIT/VALIDITY
+      tag data to update with the given criteria and validity
+   --hour, --day, --month, --year
+      tag the data according to the current time
+      the data is kept in the database for the last preiod only
+      example: --day keep the data for each day of the month
+      (next month, the data is removed)
 Options:
    $0 setup database_file
    $0 update database_file

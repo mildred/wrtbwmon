@@ -10,8 +10,12 @@ function newRule(arp_ip,
     # always called after db is read, arp table is read, and existing
     # iptables rules are read.
     ipt_cmd="iptables -t mangle -j RETURN -s " arp_ip
+    if(debug)
+        print ipt_cmd " -C RRDIPT_FORWARD 2>/dev/null || " ipt_cmd " -A RRDIPT_FORWARD" >"/dev/stderr"
     system(ipt_cmd " -C RRDIPT_FORWARD 2>/dev/null || " ipt_cmd " -A RRDIPT_FORWARD")
     ipt_cmd="iptables -t mangle -j RETURN -d " arp_ip
+    if(debug)
+        print ipt_cmd " -C RRDIPT_FORWARD 2>/dev/null || " ipt_cmd " -A RRDIPT_FORWARD" >"/dev/stderr"
     system(ipt_cmd " -C RRDIPT_FORWARD 2>/dev/null || " ipt_cmd " -A RRDIPT_FORWARD")
 }
 
@@ -19,8 +23,9 @@ function total(i){
     return(bw[i "/in"] + bw[i "/out"])
 }
 
-function date(    cmd, d){
-    cmd="date +%d-%m-%Y_%H:%M:%S"
+function date(format,    cmd, d){
+    if(!format) format="%Y-%m-%d_%H:%M:%S"
+    cmd="date +" format
     cmd | getline d
     close(cmd)
     #!@todo could start a process with "while true; do date ...; done"
@@ -32,6 +37,20 @@ BEGIN {
     fid=1
     debug=0
     rrd=0
+    split(criteria, criteria_list, ",")
+    split(validity, validity_list, ",")
+    for(i in criteria_list){
+        if(!criteria_list[i]) delete criteria_list[i]
+        if(!criteria_list[i]) delete validity_list[i]
+    }
+    for(i in criteria_list){
+        c = criteria_list[i]
+        v = validity_list[i]
+        val[c] = v
+        if(debug)
+            print "Criteria " c " validity " v >"/dev/stderr"
+    }
+    run_date=date()
 }
 
 /^#/ { # get DB filename
@@ -42,6 +61,7 @@ BEGIN {
 
 # data from database; first file
 FNR==NR { #!@todo this doesn't help if the DB file is empty.
+    if($1 $2 == "") next
     if($2 == "NA")
 	#!@todo could get interface IP here
 	n=$1
@@ -49,6 +69,12 @@ FNR==NR { #!@todo this doesn't help if the DB file is empty.
 	n=$2
 
     hosts[n] = "" # add this host/interface to hosts
+
+    if($9 $10) {
+        n = $9 "/" $10 "/" n
+        if(!val[$9]) val[$9] = $10
+    }
+
     mac[n]        =  $1
     ip[n]         =  $2
     inter[n]      =  $3
@@ -56,6 +82,7 @@ FNR==NR { #!@todo this doesn't help if the DB file is empty.
     bw[n "/out"]  =  $5
     firstDate[n]  =  $7
     lastDate[n]   =  $8
+    crit[n]       =  $9
     next
 }
 
@@ -63,8 +90,52 @@ FNR==NR { #!@todo this doesn't help if the DB file is empty.
 FNR==1 {
     FS=" "
     fid++ #!@todo use fid for all files; may be problematic for empty files
+    #if(fid>3) FS=","
     next
 }
+
+#fid>3 {
+#    if(mac[ip[$1]]) {
+#        n=ip[$1]
+#    } else if(mac[$1]) {
+#        n=$1
+#    } else {
+#        n=""
+#    }
+#}
+
+# Add to the database
+
+#fid==4 && n=="" {
+#    n = $1
+#    mac[n]        =  $1
+#    ip[n]         =  $2
+#    inter[n]      =  $3
+#    bw[n "/in"]   =  $4
+#    bw[n "/out"]  =  $5
+#    firstDate[n]  =  $7
+#    lastDate[n]   =  $8
+#    next
+#}
+
+#fid==4 {
+#    bw[n "/in"]  +=  $4
+#    bw[n "/out"] +=  $5
+#
+#    if(firstDate[n] > $7) firstDate[n] = $7
+#    if(lastDate[n] < $8)  lastDate[n] = $8
+#    next
+#}
+
+# Substract to the database
+#fid==5 {
+#    bw[n "/in"]  -= $4
+#    bw[n "/out"] -= $5
+#
+#    if(firstDate[n] == $7) firstDate[n] = $8
+#    if(lastDate[n] == $8) lastDate[n] = $7
+#    next
+#}
 
 # arp: ip hw flags hw_addr mask device
 fid==2 {
@@ -81,7 +152,7 @@ fid==2 {
 	ip[arp_ip]    = arp_ip
 	inter[arp_ip] = arp_dev
 	bw[arp_ip "/in"] = bw[arp_ip "/out"] = 0
-	firstDate[arp_ip] = lastDate[arp_ip] = date()
+	firstDate[arp_ip] = lastDate[arp_ip] = run_date
     }
     next
 }
@@ -131,15 +202,25 @@ fid==3 && rrd { # iptables input
 		if(!(m in mac)){ # if label was not in db (also not in
 				 # arp table, but interfaces won't be
 				 # there anyway)
-		    firstDate[m] = date()
+		    firstDate[m] = run_date
 		    mac[m] = inter[m] = m
 		    ip[m] = "NA"
 		    bw[m "/in"]=bw[m "/out"]= 0
 		}
 	    }
 	    bw[n]+=$2
-	    lastDate[m] = date()
-	}
+	    lastDate[m] = run_date
+
+            for(i in criteria_list) {
+                c=criteria_list[i]
+                v=validity_list[i]
+                mm = c "/" v "/" m
+                nn = c "/" v "/" n
+                bw[nn] += $2
+                if(!firstDate[mm]) firstDate[mm] = run_date
+                lastDate[mm] = run_date
+            }
+        }
     }
 }
 
@@ -147,11 +228,18 @@ END {
     if(mode=="noUpdate") exit
     close(dbFile)
     system("rm -f " dbFile)
-    print "#mac,ip,iface,in,out,total,first_date,last_date" > dbFile
+    print "#mac,ip,iface,in,out,total,first_date,last_date,criteria,validity" > dbFile
     OFS=","
-    for(i in mac)
-	print mac[i], ip[i], inter[i], bw[i "/in"], bw[i "/out"], total(i), firstDate[i], lastDate[i] > dbFile
+    for(i in mac) {
+        if(!crit[i]) print mac[i], ip[i], inter[i], bw[i "/in"]+0, bw[i "/out"]+0, total(i)+0, firstDate[i], lastDate[i] > dbFile
+    }
+    for(c in val) {
+        if(c) for(i in mac) {
+            n = c "/" val[c] "/" i
+            if(lastDate[n]) print mac[i], ip[i], inter[i], bw[n "/in"]+0, bw[n "/out"]+0, total(n)+0, firstDate[n], lastDate[n], c, val[c] > dbFile
+        }
+    }
     close(dbFile)
     # for hosts without rules
-    for(host in hosts) if(!inInterfaces(host)) newRule(host)
+    for(host in hosts) if(!inInterfaces(host) && host != "") newRule(host)
 }

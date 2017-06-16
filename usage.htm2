@@ -1,6 +1,16 @@
 var totalIn = 0;
 var totalOut = 0;
+var criterias = {}
 for (i=0; i < values.length-1; i++) {
+    if(values[i][8]) {
+        var crit=values[i][8].match(/(.*?)=/)[1]
+        var crit_val=values[i][8].match(/=(.*)/)[1]
+        criterias[crit] = criterias[crit] || {}
+        criterias[crit][crit_val] = criterias[crit][crit_val] || []
+        criterias[crit][crit_val].push(values[i])
+        continue;
+    }
+    console.log(values[i])
     totalIn += values[i][3];
     totalOut += values[i][4];
     document.write("<tr><td><div title=\"" + values[i][1] + " (" + values[i][2] + ")" + "\">" + values[i][0] + "</div></td>");
@@ -8,7 +18,122 @@ for (i=0; i < values.length-1; i++) {
         document.write("<td>" + getSize(values[i][j]) + "</td>");
     document.write("<td>" + values[i][6] + "</td><td>" + values[i][7] + "</td></tr>");
 }
+console.log(criterias);
 document.write("<tr><td>TOTAL</td><td>" + getSize(totalIn) + "</td><td>" + getSize(totalOut) + "</td><td>" + getSize(totalIn + totalOut) + "</td><td></td><td></td></tr>");
 </script></table>
+<script>
+
+for(crit in criterias) {
+    document.write("<h1>"+crit+"</h1>");
+    var peers = {}
+    var totals = {}
+    for(crit_val in criterias[crit]) {
+        totals[crit_val] = {dn: 0, up: 0, first_date: null}
+        for(var i=0; i < criterias[crit][crit_val].length; ++i) {
+            line = criterias[crit][crit_val][i];
+            var name = line[0]+" "+line[1]+" "+line[2]
+            if(!peers[name]){
+                peers[name] = {
+                    name: line[0],
+                    mac:  line[1],
+                    ip:   line[2],
+                    data: {}
+                }
+            }
+            peers[name].data[crit_val] = {
+                dn: line[3],
+                up: line[4],
+            }
+            totals[crit_val].dn += line[3]
+            totals[crit_val].up += line[4]
+            if(totals[crit_val].first_date == null || totals[crit_val].first_date > line[6])
+                totals[crit_val].first_date = line[6]
+        }
+    }
+    sorted_crits = Object.keys(criterias[crit]).sort(function(a, b){
+        if(totals[a].first_date == totals[b].first_date) return 0;
+        return (totals[a].first_date < totals[b].first_date) ? -1 : 1;
+    })
+    console.log("peers = %o", peers)
+    console.log("totals = %o", totals)
+    console.log("criteria (sroted) = %o", sorted_crits)
+    document.write("<table border=\"1\"> <tr bgcolor=silver> <th>Peer</th> <th>MAC</th> <th>IP</th> <th></th>");
+    for(crit_val of sorted_crits) {
+        document.write("<th>"+crit_val+"</th>");
+    }
+    document.write("</tr>");
+    for(p in peers) {
+        document.write("<tr>");
+        var peer = peers[p]
+        console.log("peers[%o] = %o", p, peer)
+        document.write("<td rowspan=3>"+peer.name+"</td>");
+        document.write("<td rowspan=3>"+peer.mac+"</td>");
+        document.write("<td rowspan=3>"+peer.ip+"</td>");
+        document.write("<th>down</td>");
+        for(crit_val of sorted_crits) {
+            if(!peer.data[crit_val]) document.write("<td></td>");
+            else document.write("<td>"+getSize(peer.data[crit_val].dn)+"</td>");
+        }
+        document.write("</tr>");
+        document.write("<tr>");
+        var peer = peers[p]
+        document.write("<th>up</td>");
+        for(crit_val of sorted_crits) {
+            if(!peer.data[crit_val]) document.write("<td></td>");
+            else document.write("<td>"+getSize(peer.data[crit_val].up)+"</td>");
+        }
+        document.write("</tr>");
+        document.write("<tr>");
+        document.write("<th>total</td>");
+        for(crit_val of sorted_crits) {
+            if(!peer.data[crit_val]) document.write("<td></td>");
+            else document.write("<th>"+getSize(peer.data[crit_val].dn+peer.data[crit_val].up)+"</th>");
+        }
+        document.write("</tr>");
+    }
+    document.write("<tr>");
+    var peer = peers[p]
+    document.write("<td colspan=3 rowspan=3>TOTAL</td>");
+    document.write("<th>down</td>");
+    for(crit_val of sorted_crits) {
+        document.write("<th>"+getSize(totals[crit_val].dn)+"</th>");
+    }
+    document.write("</tr>");
+    document.write("<tr>");
+    var peer = peers[p]
+    document.write("<th>up</td>");
+    for(crit_val in criterias[crit]) {
+        document.write("<th>"+getSize(totals[crit_val].up)+"</th>");
+    }
+    document.write("</tr>");
+    document.write("<tr>");
+    document.write("<th>total</td>");
+    for(crit_val in criterias[crit]) {
+        document.write("<th>"+getSize(totals[crit_val].dn+totals[crit_val].up)+"</th>");
+    }
+    document.write("</tr>");
+    document.write("</table>");
+    /*
+    for(crit_val in criterias[crit]) {
+        var totalIn = 0;
+        var totalOut = 0;
+        document.write("<h2>"+crit_val+"</h2>");
+        document.write("<table border=\"1\"> <tr bgcolor=silver> <th>User</th> <th>Download</th> <th>Upload</th> <th>Total</th> <th>First seen</th> <th>Last seen</th> </tr>");
+        for(var i=0; i < criterias[crit][crit_val].length; ++i) {
+            line = criterias[crit][crit_val][i];
+            totalIn += line[3];
+            totalOut += line[4];
+            document.write("<tr><td><div title=\"" + line[1] + " (" + line[2] + ")" + "\">" + line[0] + "</div></td>");
+            for (j=3; j < 6; j++)
+                document.write("<td>" + getSize(line[j]) + "</td>");
+            document.write("<td>" + line[6] + "</td><td>" + line[7] + "</td></tr>");
+        }
+        document.write("<tr><td>TOTAL</td><td>" + getSize(totalIn) + "</td><td>" + getSize(totalOut) + "</td><td>" + getSize(totalIn + totalOut) + "</td><td></td><td></td></tr>");
+        document.write("</table>");
+    }
+    */
+}
+
+</script>
 <br /><small>This page was generated on (date)</small>
 </body></html>
